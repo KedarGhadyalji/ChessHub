@@ -1,0 +1,233 @@
+// ============================================================
+// Chess Knowledge Hub — Prisma Schema
+// Database: PostgreSQL
+// ORM: Prisma
+// ============================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// ADMIN
+// Stores admin credentials. Only one or a few admins exist.
+// Passwords are hashed with bcrypt before storage.
+// ============================================================
+model Admin {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  name         String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@map("admins")
+}
+
+// ============================================================
+// SECTION
+// Top-level categories for grouping lessons.
+// e.g. "Pieces", "Tactics", "Openings", "Endgames"
+// ============================================================
+model Section {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  slug        String   @unique
+  description String?
+  icon        String?  // icon name / emoji key
+  color       String?  // hex or tailwind color token
+  order       Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  lessons     Lesson[]
+
+  @@map("sections")
+}
+
+// ============================================================
+// LESSON
+// Core content entity. Each lesson belongs to one section
+// and is composed of an ordered list of LessonBlocks.
+// ============================================================
+model Lesson {
+  id           String        @id @default(cuid())
+  title        String
+  slug         String        @unique
+  description  String?
+  thumbnail    String?       // URL to cover image
+  difficulty   Difficulty    @default(BEGINNER)
+  published    Boolean       @default(false)
+  featured     Boolean       @default(false)
+  order        Int           @default(0)
+  tags         String[]      @default([]) // cross-cutting topics (e.g. "Opening", "Endgame") — independent of section
+  previewToken String?       @unique // set when an admin generates a shareable draft-preview link; null = no active link
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  // Foreign keys
+  sectionId   String
+
+  // Relations
+  section     Section       @relation(fields: [sectionId], references: [id], onDelete: Cascade)
+  blocks      LessonBlock[]
+  views       LessonView[]
+
+  @@index([sectionId])
+  @@index([slug])
+  @@index([published])
+  @@index([featured])
+  @@index([tags], type: Gin) // enables efficient "has"/"hasSome" tag filtering
+  @@map("lessons")
+}
+
+// Enum for lesson difficulty level
+enum Difficulty {
+  BEGINNER
+  INTERMEDIATE
+  ADVANCED
+}
+
+// ============================================================
+// LESSON BLOCK
+// Polymorphic content blocks that compose a lesson.
+// Each block has a type and a JSON `content` field whose
+// shape varies by type (see BlockType enum).
+//
+// TextBlock content:    { html: string }
+// ChessboardBlock:      { fen: string, orientation: "white"|"black", caption?: string }
+// AnnotationBlock:      { fen: string, arrows: Arrow[], highlights: Square[] }
+// AnimationBlock:       { steps: Step[], orientation: "white"|"black" }
+//
+// Arrow:  { from: string, to: string, color: string }
+// Square: { square: string, color: string }
+// Step:   { fen: string, move: string, description: string }
+// ============================================================
+model LessonBlock {
+  id        String    @id @default(cuid())
+  type      BlockType
+  content   Json
+  order     Int       @default(0)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  // Foreign keys
+  lessonId  String
+
+  // Relations
+  lesson    Lesson    @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+
+  @@index([lessonId])
+  @@index([lessonId, order])
+  @@map("lesson_blocks")
+}
+
+// Enum for supported block types in the lesson builder
+enum BlockType {
+  TEXT
+  CHESSBOARD
+  ANNOTATION
+  ANIMATION
+}
+
+// ============================================================
+// SUGGESTION
+// Submitted via the public Contact page.
+// Admins can view and mark suggestions as resolved.
+// ============================================================
+model Suggestion {
+  id         String           @id @default(cuid())
+  name       String
+  email      String
+  type       SuggestionType   @default(FEEDBACK)
+  subject    String
+  message    String
+  status     SuggestionStatus @default(OPEN)
+  adminNotes String?
+  createdAt  DateTime         @default(now())
+  updatedAt  DateTime         @updatedAt
+
+  @@index([status])
+  @@index([createdAt])
+  @@map("suggestions")
+}
+
+enum SuggestionType {
+  FEEDBACK
+  FEATURE_REQUEST
+  BUG_REPORT
+  LESSON_REQUEST
+}
+
+enum SuggestionStatus {
+  OPEN
+  IN_REVIEW
+  RESOLVED
+  DISMISSED
+}
+
+// ============================================================
+// VISITOR STAT
+// Aggregated daily visitor counts.
+// One record per date. Upserted by the visitorTracker middleware.
+// ============================================================
+model VisitorStat {
+  id           String   @id @default(cuid())
+  date         DateTime @unique @db.Date
+  uniqueVisits Int      @default(0)
+  totalVisits  Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([date])
+  @@map("visitor_stats")
+}
+
+// ============================================================
+// LESSON VIEW
+// One record per lesson visit event.
+// Used for: view counts, popular lessons, trend analytics.
+// visitorId is an anonymous fingerprint stored in a cookie.
+// ============================================================
+model LessonView {
+  id         String   @id @default(cuid())
+  visitorId  String?  // anonymous session/cookie id
+  ipHash     String?  // hashed IP (privacy-safe)
+  userAgent  String?
+  referrer   String?
+  createdAt  DateTime @default(now())
+
+  // Foreign keys
+  lessonId   String
+
+  // Relations
+  lesson     Lesson   @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+
+  @@index([lessonId])
+  @@index([createdAt])
+  @@index([lessonId, createdAt])
+  @@map("lesson_views")
+}
+
+// ============================================================
+// SEARCH QUERY
+// Logs every search term entered on the public site.
+// Used for: popular searches analytics, content gap discovery.
+// ============================================================
+model SearchQuery {
+  id          String   @id @default(cuid())
+  query       String
+  resultCount Int      @default(0)
+  visitorId   String?
+  createdAt   DateTime @default(now())
+
+  @@index([query])
+  @@index([createdAt])
+  @@map("search_queries")
+}
